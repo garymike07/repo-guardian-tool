@@ -30,8 +30,13 @@ _lock = threading.Lock()
 _next_id = 0
 
 
-def push_event(title: str, message: str, url: str | None = None, level: str = "info") -> dict:
-    """Record an event and fan it out to any open dashboard tabs."""
+def push_event(title: str, message: str, url: str | None = None, level: str = "info",
+               category: str = "system") -> dict:
+    """Record an event and fan it out to any open dashboard tabs.
+
+    category is one of: folder, github, vercel, convex, system — used to
+    route the event to the right live card on the dashboard.
+    """
     global _next_id
     with _lock:
         _next_id += 1
@@ -43,6 +48,7 @@ def push_event(title: str, message: str, url: str | None = None, level: str = "i
             "message": message,
             "url": url,
             "level": level,
+            "category": category,
         }
         _events.append(ev)
         dead = []
@@ -171,7 +177,22 @@ _PAGE_HTML = """
   .card .value { font-size: 14px; word-break: break-word; }
   .card .value.mono { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; color: var(--muted); }
   h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 12px; }
+  .platform-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 14px; margin-bottom: 26px; }
+  .pcard { background: var(--panel-2); border: 1px solid var(--border); border-radius: 14px; padding: 16px 18px;
+           cursor: pointer; transition: border-color .15s ease, transform .15s ease; }
+  .pcard:hover { border-color: var(--accent-dim); transform: translateY(-1px); }
+  .pcard.active { border-color: var(--accent); }
+  .pcard .ptop { display: flex; align-items: center; justify-content: space-between; margin-bottom: 8px; }
+  .pcard .pname { font-weight: 600; font-size: 14.5px; display: flex; align-items: center; gap: 8px; }
+  .pcard .picon { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+  .pcard .picon.live { background: var(--accent); box-shadow: 0 0 0 0 rgba(74,222,128,.6); animation: pulse 1.8s infinite; }
+  .pcard .pcount { font-size: 11px; color: var(--muted); background: var(--bg); border: 1px solid var(--border);
+                    border-radius: 999px; padding: 2px 8px; }
+  .pcard .plast { font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .pcard .phint { font-size: 11px; color: var(--muted); margin-top: 6px; opacity: .7; }
   #events { display: flex; flex-direction: column; gap: 8px; }
+  .filter-bar { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+  .filter-bar .clear { font-size: 11.5px; color: var(--info); cursor: pointer; }
   .ev { background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--info);
         border-radius: 8px; padding: 10px 14px; animation: slidein .25s ease; }
   .ev.success { border-left-color: var(--accent); }
@@ -192,7 +213,14 @@ _PAGE_HTML = """
 </header>
 <main>
   <div class="grid" id="status-grid"></div>
-  <h2>Live activity</h2>
+
+  <h2>Platforms — click a card to see its live activity</h2>
+  <div class="platform-grid" id="platform-grid"></div>
+
+  <div class="filter-bar">
+    <h2 style="margin:0" id="events-heading">Live activity</h2>
+    <span class="clear" id="clear-filter" style="display:none">✕ show all</span>
+  </div>
   <div id="events"><div class="empty">Waiting for the first event…</div></div>
 </main>
 <script>
@@ -212,24 +240,82 @@ async function loadStatus() {
     <div class="card"><div class="label">Convex projects</div><div class="value">${s.convex_projects.join(', ') || '—'}</div></div>
   `;
 }
-function renderEvent(ev) {
+const PLATFORMS = [
+  { key: 'folder',  name: 'Sites folder', hint: 'File changes detected on disk' },
+  { key: 'github',  name: 'GitHub',       hint: 'Commits, pushes, PRs' },
+  { key: 'vercel',  name: 'Vercel',       hint: 'Deployments & status' },
+  { key: 'convex',  name: 'Convex',       hint: 'Backend deploys & live errors' },
+];
+let allEvents = [];       // newest first
+let activeFilter = null;  // null = show all
+
+function summarize() {
+  const now = Date.now();
+  return PLATFORMS.map(p => {
+    const evs = allEvents.filter(e => e.category === p.key);
+    const last = evs[0];
+    const recent = last && (now - Date.parse(`${last.date}T${last.ts}`)) < 5 * 60 * 1000;
+    return { ...p, count: evs.length, last, recent };
+  });
+}
+
+function renderPlatformGrid() {
+  const grid = document.getElementById('platform-grid');
+  grid.innerHTML = summarize().map(p => `
+    <div class="pcard ${activeFilter === p.key ? 'active' : ''}" data-key="${p.key}">
+      <div class="ptop">
+        <span class="pname"><span class="picon ${p.recent ? 'live' : ''}"></span>${p.name}</span>
+        <span class="pcount">${p.count}</span>
+      </div>
+      <div class="plast">${p.last ? `${p.last.title}` : 'No activity yet'}</div>
+      <div class="phint">${p.last ? p.last.ts : p.hint}</div>
+    </div>
+  `).join('');
+  grid.querySelectorAll('.pcard').forEach(el => {
+    el.addEventListener('click', () => {
+      const key = el.dataset.key;
+      activeFilter = activeFilter === key ? null : key;
+      renderPlatformGrid();
+      renderEventList();
+    });
+  });
+}
+
+function renderEventList() {
   const box = document.getElementById('events');
-  if (box.querySelector('.empty')) box.innerHTML = '';
-  const div = document.createElement('div');
-  div.className = 'ev ' + (ev.level || 'info');
-  const msg = ev.url ? `${ev.message}<br><a href="${ev.url}" target="_blank">Open →</a>` : ev.message;
-  div.innerHTML = `<div class="ev-top"><span class="ev-title">${ev.title}</span><span class="ev-time">${ev.ts}</span></div><div class="ev-msg">${msg}</div>`;
-  box.prepend(div);
-  while (box.children.length > 150) box.removeChild(box.lastChild);
+  const heading = document.getElementById('events-heading');
+  const clearBtn = document.getElementById('clear-filter');
+  const list = activeFilter ? allEvents.filter(e => e.category === activeFilter) : allEvents;
+  const label = activeFilter ? (PLATFORMS.find(p => p.key === activeFilter) || {}).name : null;
+  heading.textContent = label ? `Live activity — ${label}` : 'Live activity';
+  clearBtn.style.display = activeFilter ? 'inline' : 'none';
+  if (!list.length) { box.innerHTML = '<div class="empty">No activity yet</div>'; return; }
+  box.innerHTML = list.slice(0, 150).map(ev => {
+    const msg = ev.url ? `${ev.message}<br><a href="${ev.url}" target="_blank">Open →</a>` : ev.message;
+    return `<div class="ev ${ev.level || 'info'}"><div class="ev-top"><span class="ev-title">${ev.title}</span><span class="ev-time">${ev.ts}</span></div><div class="ev-msg">${msg}</div></div>`;
+  }).join('');
+}
+document.getElementById('clear-filter').addEventListener('click', () => {
+  activeFilter = null; renderPlatformGrid(); renderEventList();
+});
+
+function addEvent(ev) {
+  allEvents.unshift(ev);
+  if (allEvents.length > 300) allEvents.pop();
+  renderPlatformGrid();
+  renderEventList();
 }
 async function loadRecent() {
   const r = await fetch('/api/events'); const evs = await r.json();
-  evs.slice().reverse().forEach(renderEvent);
+  allEvents = evs.slice().reverse();
+  renderPlatformGrid();
+  renderEventList();
 }
 loadStatus(); loadRecent();
 setInterval(loadStatus, 20000);
+setInterval(renderPlatformGrid, 30000); // keep the "live" dot accurate as time passes
 const es = new EventSource('/api/stream');
-es.onmessage = (e) => renderEvent(JSON.parse(e.data));
+es.onmessage = (e) => addEvent(JSON.parse(e.data));
 </script>
 </body>
 </html>

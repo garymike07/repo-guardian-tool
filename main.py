@@ -199,18 +199,19 @@ def on_project_changed(project_name: str, changed_paths: list[str]) -> None:
 
     if not config.APPLY_CHANGES:
         notify(f"{project_name}: changes detected",
-               f"{len(rel_paths)} file(s) changed: {preview}\n(dry run — set apply_changes=true to auto-deploy)")
+               f"{len(rel_paths)} file(s) changed: {preview}\n(dry run — set apply_changes=true to auto-deploy)",
+               category="folder")
         return
 
     # 2. Commit + push/PR
     result = git_ops.commit_and_publish(project_path, changed_paths)
     if result["committed"] and result["pushed"]:
         if result["pr_url"]:
-            notify(f"{project_name}: PR opened", "Review and merge when ready.", url=result["pr_url"])
+            notify(f"{project_name}: PR opened", "Review and merge when ready.", url=result["pr_url"], category="github")
         else:
-            notify(f"{project_name}: pushed to {result['branch']}", preview)
+            notify(f"{project_name}: pushed to {result['branch']}", preview, category="github")
     elif result["committed"] and not result["pushed"]:
-        notify(f"{project_name}: commit ok, push FAILED", "Check credentials.json token permissions.")
+        notify(f"{project_name}: commit ok, push FAILED", "Check credentials.json token permissions.", category="github")
 
     # 3. Convex deploy if convex/ changed
     if deploy.has_convex_changes(changed_paths):
@@ -218,9 +219,9 @@ def on_project_changed(project_name: str, changed_paths: list[str]) -> None:
         if convex_project:
             dep_result = deploy.deploy_convex(project_path, convex_project["deploy_key"])
             if dep_result["success"]:
-                notify(f"{project_name}: Convex deployed", "Backend deploy succeeded.")
+                notify(f"{project_name}: Convex deployed", "Backend deploy succeeded.", category="convex")
             else:
-                notify(f"{project_name}: Convex deploy FAILED", dep_result["output"][-200:])
+                notify(f"{project_name}: Convex deploy FAILED", dep_result["output"][-200:], category="convex")
 
     # 4. Vercel deploy if this folder is a linked Vercel project
     target = _resolve_vercel_target(project_name)
@@ -228,9 +229,9 @@ def on_project_changed(project_name: str, changed_paths: list[str]) -> None:
         token, _ = target
         dep_result = deploy.deploy_vercel(project_path, token)
         if dep_result["success"]:
-            notify(f"{project_name}: Vercel deployed", "Deploy succeeded.", url=dep_result.get("url"))
+            notify(f"{project_name}: Vercel deployed", "Deploy succeeded.", url=dep_result.get("url"), category="vercel")
         else:
-            notify(f"{project_name}: Vercel deploy FAILED", dep_result["output"][-200:])
+            notify(f"{project_name}: Vercel deploy FAILED", dep_result["output"][-200:], category="vercel")
 
 
 def github_poll_cycle() -> None:
@@ -252,12 +253,12 @@ def github_poll_cycle() -> None:
         if is_first_check:
             continue  # don't fire a notification just for establishing baseline on first run
 
-        notify(f"GitHub: {full_name}", f"New commit on {branch} ({sha[:7]})")
+        notify(f"GitHub: {full_name}", f"New commit on {branch} ({sha[:7]})", category="github")
 
         try:
             summary = github_manager.remote_cleanup_pass(repo)
             if summary["pr_url"]:
-                notify(f"repo-guardian: {full_name}", "Cleanup/README PR opened", url=summary["pr_url"])
+                notify(f"repo-guardian: {full_name}", "Cleanup/README PR opened", url=summary["pr_url"], category="github")
         except Exception as e:  # noqa: BLE001
             log.error("Remote cleanup pass failed for %s: %s", full_name, e)
 
@@ -274,11 +275,11 @@ def vercel_poll_cycle() -> None:
         status = (ev["status"] or "unknown").upper()
         title = f"Vercel [{ev['account_label']}]: {ev['project_name']} — {status}"
         if status in ("ERROR", "CANCELED"):
-            notify(title, "Deployment failed — tap to inspect.", url=ev.get("inspector_url") or ev.get("url"))
+            notify(title, "Deployment failed — tap to inspect.", url=ev.get("inspector_url") or ev.get("url"), category="vercel")
         elif status == "READY":
-            notify(title, "Deployed successfully.", url=ev.get("url"))
+            notify(title, "Deployed successfully.", url=ev.get("url"), category="vercel")
         else:
-            notify(title, f"Status changed to {status}.")
+            notify(title, f"Status changed to {status}.", category="vercel")
 
 
 def poll_loop() -> None:

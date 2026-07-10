@@ -27,15 +27,19 @@ def _infer_level(title: str, message: str) -> str:
     return "info"
 
 
-def notify(title: str, message: str, url: str | None = None) -> None:
+def notify(title: str, message: str, url: str | None = None, category: str = "system") -> None:
     """
     Show a toast notification and stream the same event to the local
     dashboard (http://127.0.0.1:<port>/). If `url` is given, clicking the
     toast (or the dashboard entry) opens it in the default browser.
+
+    category routes the event to the right live card on the dashboard:
+    "folder", "github", "vercel", "convex", or "system".
     """
-    log.info("NOTIFY: %s — %s", title, message)
+    log.info("NOTIFY [%s]: %s — %s", category, title, message)
     try:
-        dashboard.push_event(title, message, url=url, level=_infer_level(title, message))
+        dashboard.push_event(title, message, url=url, level=_infer_level(title, message),
+                              category=category)
     except Exception as e:  # noqa: BLE001 - dashboard hiccups must never break notifications
         log.error("Dashboard event push failed: %s", e)
     if not _HAS_TOAST:
