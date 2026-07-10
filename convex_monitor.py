@@ -38,7 +38,7 @@ def _tail_project(name: str, folder: str) -> None:
     for line in proc.stdout:
         line = line.strip()
         if line and ERROR_PATTERN.search(line):
-            notify(f"Convex error — {name}", line[:250])
+            notify(f"Convex error — {name}", line[:250], category="convex")
             log.warning("[%s] %s", name, line)
 
 

@@ -21,21 +21,17 @@ auto-deploy) so you're notified even for changes made outside this laptop.
 Convex errors are tailed live and notified immediately, independent of the
 poll cycle.
 
-The tray icon's "Open Dashboard" shows a real native desktop window (via
-pywebview / Windows' built-in WebView2 — no browser chrome, no address bar)
-with a live feed of everything above. It's movable and resizable like any
-other window, and closing it just hides it — repo-guardian keeps running.
+The tray icon's "Open Dashboard" shows a real native desktop window built
+with Tkinter (Python's built-in GUI toolkit) — no web technology involved
+at all: no Flask, no HTTP server, no browser, no WebView2. It's movable and
+resizable like any other window, and closing it just hides it — repo-guardian
+keeps running.
 """
 import logging
 import logging.handlers
-import shutil
 import socket
-import subprocess
 import sys
 import threading
-import time
-import webbrowser
-from pathlib import Path
 
 import config
 import dashboard
@@ -48,12 +44,6 @@ import git_ops
 import deploy
 import state
 from notifier import notify
-
-try:
-    import webview  # pywebview — renders the dashboard as a real OS window
-    _HAS_WEBVIEW = True
-except ImportError:
-    _HAS_WEBVIEW = False
 
 LOG_DIR = config.BASE_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)
@@ -96,62 +86,10 @@ def _acquire_single_instance_lock() -> bool:
     return True
 
 
-def _dashboard_url() -> str:
-    return f"http://127.0.0.1:{config.DASHBOARD_PORT}/"
-
-
-# --- Native window state (used only when pywebview is available) -----------
-_webview_window = None
-_shutting_down = False
-
-
-def _on_window_closing() -> bool:
-    """Clicking the window's X hides it instead of quitting — repo-guardian
-    keeps running in the background, exactly like minimizing to tray."""
-    if _shutting_down:
-        return True  # real shutdown in progress (tray Exit) — allow it
-    if _webview_window is not None:
-        _webview_window.hide()
-    return False  # veto the close
-
-
-# --- Fallback path if pywebview isn't installed: open a real browser -------
-_BROWSER_CANDIDATES = [
-    "msedge", "chrome",
-    r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-    r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
-    r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-    r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-]
-
-
-def _find_app_mode_browser() -> str | None:
-    for candidate in _BROWSER_CANDIDATES:
-        if candidate.lower().endswith(".exe"):
-            if Path(candidate).exists():
-                return candidate
-        else:
-            path = shutil.which(candidate)
-            if path:
-                return path
-    return None
-
-
 def open_dashboard_window(icon=None, item=None) -> None:
-    """Show the native dashboard window. Falls back to a chromeless app-style
-    browser window, then a normal browser tab, if pywebview isn't installed."""
-    if _HAS_WEBVIEW and _webview_window is not None:
-        _webview_window.show()
-        return
-    url = _dashboard_url()
-    browser = _find_app_mode_browser()
-    if browser:
-        try:
-            subprocess.Popen([browser, f"--app={url}", "--window-size=480,780"])
-            return
-        except Exception as e:  # noqa: BLE001
-            log.warning("Could not launch browser in app mode: %s", e)
-    webbrowser.open(url)
+    """Show the native Tkinter dashboard window (created once on the main
+    thread at startup)."""
+    dashboard.show()
 
 # cache of GitHub full_name per local folder, populated lazily
 _repo_cache: dict[str, str] = {}
@@ -199,18 +137,19 @@ def on_project_changed(project_name: str, changed_paths: list[str]) -> None:
 
     if not config.APPLY_CHANGES:
         notify(f"{project_name}: changes detected",
-               f"{len(rel_paths)} file(s) changed: {preview}\n(dry run — set apply_changes=true to auto-deploy)")
+               f"{len(rel_paths)} file(s) changed: {preview}\n(dry run — set apply_changes=true to auto-deploy)",
+               category="folder")
         return
 
     # 2. Commit + push/PR
     result = git_ops.commit_and_publish(project_path, changed_paths)
     if result["committed"] and result["pushed"]:
         if result["pr_url"]:
-            notify(f"{project_name}: PR opened", "Review and merge when ready.", url=result["pr_url"])
+            notify(f"{project_name}: PR opened", "Review and merge when ready.", url=result["pr_url"], category="github")
         else:
-            notify(f"{project_name}: pushed to {result['branch']}", preview)
+            notify(f"{project_name}: pushed to {result['branch']}", preview, category="github")
     elif result["committed"] and not result["pushed"]:
-        notify(f"{project_name}: commit ok, push FAILED", "Check credentials.json token permissions.")
+        notify(f"{project_name}: commit ok, push FAILED", "Check credentials.json token permissions.", category="github")
 
     # 3. Convex deploy if convex/ changed
     if deploy.has_convex_changes(changed_paths):
@@ -218,9 +157,9 @@ def on_project_changed(project_name: str, changed_paths: list[str]) -> None:
         if convex_project:
             dep_result = deploy.deploy_convex(project_path, convex_project["deploy_key"])
             if dep_result["success"]:
-                notify(f"{project_name}: Convex deployed", "Backend deploy succeeded.")
+                notify(f"{project_name}: Convex deployed", "Backend deploy succeeded.", category="convex")
             else:
-                notify(f"{project_name}: Convex deploy FAILED", dep_result["output"][-200:])
+                notify(f"{project_name}: Convex deploy FAILED", dep_result["output"][-200:], category="convex")
 
     # 4. Vercel deploy if this folder is a linked Vercel project
     target = _resolve_vercel_target(project_name)
@@ -228,9 +167,9 @@ def on_project_changed(project_name: str, changed_paths: list[str]) -> None:
         token, _ = target
         dep_result = deploy.deploy_vercel(project_path, token)
         if dep_result["success"]:
-            notify(f"{project_name}: Vercel deployed", "Deploy succeeded.", url=dep_result.get("url"))
+            notify(f"{project_name}: Vercel deployed", "Deploy succeeded.", url=dep_result.get("url"), category="vercel")
         else:
-            notify(f"{project_name}: Vercel deploy FAILED", dep_result["output"][-200:])
+            notify(f"{project_name}: Vercel deploy FAILED", dep_result["output"][-200:], category="vercel")
 
 
 def github_poll_cycle() -> None:
@@ -252,12 +191,12 @@ def github_poll_cycle() -> None:
         if is_first_check:
             continue  # don't fire a notification just for establishing baseline on first run
 
-        notify(f"GitHub: {full_name}", f"New commit on {branch} ({sha[:7]})")
+        notify(f"GitHub: {full_name}", f"New commit on {branch} ({sha[:7]})", category="github")
 
         try:
             summary = github_manager.remote_cleanup_pass(repo)
             if summary["pr_url"]:
-                notify(f"repo-guardian: {full_name}", "Cleanup/README PR opened", url=summary["pr_url"])
+                notify(f"repo-guardian: {full_name}", "Cleanup/README PR opened", url=summary["pr_url"], category="github")
         except Exception as e:  # noqa: BLE001
             log.error("Remote cleanup pass failed for %s: %s", full_name, e)
 
@@ -274,11 +213,11 @@ def vercel_poll_cycle() -> None:
         status = (ev["status"] or "unknown").upper()
         title = f"Vercel [{ev['account_label']}]: {ev['project_name']} — {status}"
         if status in ("ERROR", "CANCELED"):
-            notify(title, "Deployment failed — tap to inspect.", url=ev.get("inspector_url") or ev.get("url"))
+            notify(title, "Deployment failed — tap to inspect.", url=ev.get("inspector_url") or ev.get("url"), category="vercel")
         elif status == "READY":
-            notify(title, "Deployed successfully.", url=ev.get("url"))
+            notify(title, "Deployed successfully.", url=ev.get("url"), category="vercel")
         else:
-            notify(title, f"Status changed to {status}.")
+            notify(title, f"Status changed to {status}.", category="vercel")
 
 
 def poll_loop() -> None:
@@ -316,12 +255,9 @@ def _build_tray_icon():
     ImageDraw.Draw(img).ellipse((8, 8, 56, 56), fill="lime")
 
     def on_exit(icon, item):
-        global _shutting_down
-        _shutting_down = True
         _stop_event.set()
         icon.stop()
-        if _HAS_WEBVIEW and _webview_window is not None:
-            _webview_window.destroy()
+        dashboard.destroy()
 
     return pystray.Icon(
         "repo-guardian", img, "repo-guardian",
@@ -333,8 +269,6 @@ def _build_tray_icon():
 
 
 def main() -> None:
-    global _webview_window
-
     if not _acquire_single_instance_lock():
         log.warning("repo-guardian is already running (lock port %s in use) — exiting this copy.",
                     _LOCK_PORT)
@@ -346,9 +280,14 @@ def main() -> None:
 
     log.info("apply_changes=%s  commit_mode=%s", config.APPLY_CHANGES, config.COMMIT_MODE)
 
-    threading.Thread(target=dashboard.run, kwargs={"port": config.DASHBOARD_PORT}, daemon=True).start()
-    time.sleep(0.4)  # give the dashboard server a moment to bind before a window tries to load it
-    log.info("Dashboard running at %s", _dashboard_url())
+    tray_icon = _build_tray_icon()
+    if tray_icon is None:
+        log.info("pystray/Pillow not installed — no tray icon. The dashboard window will show on start.")
+
+    # Tkinter must be created and driven from the main thread — do that here,
+    # before starting any other threads, and block on its mainloop at the end.
+    start_visible = config.SHOW_DASHBOARD_ON_START or tray_icon is None
+    dashboard.create_window(start_visible=start_visible)
 
     bootstrap_agents_md()
     observer = folder_watcher.start(on_project_changed)
@@ -360,32 +299,14 @@ def main() -> None:
 
     threading.Thread(target=poll_loop, daemon=True).start()
 
-    tray_icon = _build_tray_icon()
-    if tray_icon is None:
-        log.info("pystray/Pillow not installed — no tray icon. Dashboard: %s", _dashboard_url())
-    else:
+    if tray_icon is not None:
         threading.Thread(target=tray_icon.run, daemon=True).start()
 
-    if _HAS_WEBVIEW:
-        # Native desktop window (WebView2) — movable, resizable, no browser chrome.
-        # Shown immediately if configured to, or if there's no tray icon to reopen it from.
-        start_visible = config.SHOW_DASHBOARD_ON_START or tray_icon is None
-        _webview_window = webview.create_window(
-            "repo-guardian", _dashboard_url(),
-            width=480, height=780, resizable=True, hidden=not start_visible,
-        )
-        _webview_window.events.closing += _on_window_closing
-    else:
-        log.info("pywebview not installed — 'Open Dashboard' will use your browser instead. "
-                  "For a native window: pip install pywebview")
-        if config.SHOW_DASHBOARD_ON_START:
-            threading.Timer(2.0, open_dashboard_window).start()
-
     try:
-        if _HAS_WEBVIEW:
-            webview.start(debug=False)  # blocks here on the main thread until the window is destroyed
+        if dashboard.has_window():
+            dashboard.mainloop()  # blocks here on the main thread until the window is destroyed
         else:
-            _stop_event.wait()  # nothing else needs the main thread — just keep the process alive
+            _stop_event.wait()  # no GUI toolkit available — just keep the process alive
     except KeyboardInterrupt:
         pass
     finally:

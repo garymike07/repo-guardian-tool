@@ -1,37 +1,55 @@
 """
-Local-only web dashboard for repo-guardian.
+Native desktop dashboard for repo-guardian.
 
-Runs a small Flask server on 127.0.0.1 (never exposed to the network) that
-shows a live feed of everything repo-guardian is doing, plus a snapshot of
-what's configured (accounts, projects, watch folder, dry-run status).
+Pure Tkinter (Python's built-in GUI toolkit) — no Flask, no HTTP server, no
+port, no browser, no WebView2. This is a genuine native OS window; nothing
+in its rendering path is web technology of any kind.
 
-Nothing here ever serves tokens/deploy keys — only labels/usernames/emails.
-
-Opened via the tray icon ("Open Dashboard"), or manually at
-http://127.0.0.1:<port>/ in any browser.
+Closing the window (the X button) just hides it — repo-guardian keeps
+running in the background. Tray icon -> "Open Dashboard" shows it again.
+Only tray icon -> "Exit" actually destroys it and quits the app.
 """
-import json
 import logging
 import queue
 import threading
 import time
+import webbrowser
 from collections import deque
 
-from flask import Flask, Response, jsonify, render_template_string
+try:
+    import tkinter as tk
+    from tkinter import ttk
+    _HAS_TK = True
+except ImportError:
+    _HAS_TK = False
 
 log = logging.getLogger("repo_guardian.dashboard")
 
-app = Flask(__name__)
-_start_time = time.time()
+_COLORS = {
+    "bg": "#0d0f14", "panel": "#161922", "panel2": "#1d212c", "border": "#262b38",
+    "text": "#e7e9ee", "muted": "#8891a3", "accent": "#4ade80", "accent_dim": "#1f6f45",
+    "err": "#f87171", "warn": "#fbbf24", "info": "#60a5fa",
+}
+
+PLATFORMS = [
+    ("folder", "Sites folder", "File changes detected on disk"),
+    ("github", "GitHub", "Commits, pushes, PRs"),
+    ("vercel", "Vercel", "Deployments & status"),
+    ("convex", "Convex", "Backend deploys & live errors"),
+]
 
 _events = deque(maxlen=300)
-_subscribers: list[queue.Queue] = []
 _lock = threading.Lock()
 _next_id = 0
+_ui_queue: "queue.Queue" = queue.Queue()
+_start_time = time.time()
 
 
-def push_event(title: str, message: str, url: str | None = None, level: str = "info") -> dict:
-    """Record an event and fan it out to any open dashboard tabs."""
+def push_event(title: str, message: str, url: str | None = None, level: str = "info",
+               category: str = "system") -> dict:
+    """Record an event and hand it to the dashboard window (if open) via a
+    thread-safe queue. Safe to call from any background thread — folder
+    watcher, GitHub/Vercel pollers, Convex log tail, etc. all call this."""
     global _next_id
     with _lock:
         _next_id += 1
@@ -43,16 +61,10 @@ def push_event(title: str, message: str, url: str | None = None, level: str = "i
             "message": message,
             "url": url,
             "level": level,
+            "category": category,
         }
         _events.append(ev)
-        dead = []
-        for q in _subscribers:
-            try:
-                q.put_nowait(ev)
-            except queue.Full:
-                dead.append(q)
-        for q in dead:
-            _subscribers.remove(q)
+    _ui_queue.put(ev)
     return ev
 
 
@@ -61,176 +73,272 @@ def _recent_events() -> list:
         return list(_events)
 
 
-def _subscribe() -> "queue.Queue":
-    q: "queue.Queue" = queue.Queue(maxsize=100)
-    with _lock:
-        _subscribers.append(q)
-    return q
+class DashboardWindow:
+    """The single native dashboard window."""
 
+    def __init__(self):
+        self.root = tk.Tk()
+        self.root.title("repo-guardian")
+        self.root.geometry("480x780")
+        self.root.minsize(420, 560)
+        self.root.configure(bg=_COLORS["bg"])
+        self.root.protocol("WM_DELETE_WINDOW", self.hide)
 
-def _unsubscribe(q: "queue.Queue") -> None:
-    with _lock:
-        if q in _subscribers:
-            _subscribers.remove(q)
+        self.active_filter: str | None = None
+        self.all_events: list[dict] = []
+        self._platform_widgets: dict[str, dict] = {}
+        self._row_urls: dict[str, str] = {}
 
+        self._build_ui()
+        self._load_recent()
+        self._render_platforms()
+        self._render_events()
+        self.root.after(300, self._poll_queue)
+        self.root.after(200, self._refresh_status)
 
-@app.route("/")
-def index():
-    return render_template_string(_PAGE_HTML)
+    # ---------------------------------------------------------------- UI --
+    def _build_ui(self):
+        root = self.root
 
+        header = tk.Frame(root, bg=_COLORS["bg"])
+        header.pack(fill="x", padx=16, pady=(14, 8))
+        tk.Label(header, text="\u25cf repo-guardian", fg=_COLORS["accent"], bg=_COLORS["bg"],
+                 font=("Segoe UI", 12, "bold")).pack(side="left")
+        self.mode_pill = tk.Label(header, text="...", fg=_COLORS["muted"], bg=_COLORS["bg"],
+                                   font=("Segoe UI", 9))
+        self.mode_pill.pack(side="right")
 
-@app.route("/api/status")
-def api_status():
-    import config  # local import: config may not be loaded until after credentials.json exists
+        self.status_frame = tk.Frame(root, bg=_COLORS["bg"])
+        self.status_frame.pack(fill="x", padx=16)
+        self.status_labels: dict[str, tk.Label] = {}
+        for key in ("watch_folder", "poll_interval", "commit_mode", "uptime"):
+            row = tk.Frame(self.status_frame, bg=_COLORS["panel"], highlightbackground=_COLORS["border"],
+                            highlightthickness=1)
+            row.pack(fill="x", pady=3)
+            tk.Label(row, text=key.replace("_", " ").upper(), fg=_COLORS["muted"], bg=_COLORS["panel"],
+                     font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=10, pady=(6, 0))
+            lbl = tk.Label(row, text="—", fg=_COLORS["text"], bg=_COLORS["panel"], font=("Segoe UI", 9),
+                           anchor="w", justify="left", wraplength=420)
+            lbl.pack(anchor="w", padx=10, pady=(0, 6))
+            self.status_labels[key] = lbl
 
-    uptime = int(time.time() - _start_time)
-    return jsonify({
-        "watch_folder": str(config.WATCH_FOLDER),
-        "apply_changes": config.APPLY_CHANGES,
-        "commit_mode": config.COMMIT_MODE,
-        "poll_interval_minutes": config.POLL_INTERVAL_MINUTES,
-        "github_accounts": [a.get("label") or a.get("username") for a in config.GITHUB_ACCOUNTS],
-        "vercel_accounts": [a.get("label") or a.get("email") for a in config.VERCEL_ACCOUNTS],
-        "convex_projects": [p.get("name") for p in config.CONVEX_PROJECTS],
-        "uptime_seconds": uptime,
-    })
+        tk.Label(root, text="PLATFORMS \u2014 CLICK A CARD FOR ITS LIVE ACTIVITY", fg=_COLORS["muted"],
+                 bg=_COLORS["bg"], font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=16, pady=(14, 6))
 
+        grid = tk.Frame(root, bg=_COLORS["bg"])
+        grid.pack(fill="x", padx=16)
+        grid.grid_columnconfigure(0, weight=1)
+        grid.grid_columnconfigure(1, weight=1)
 
-@app.route("/api/events")
-def api_events():
-    return jsonify(_recent_events())
+        for i, (key, name, hint) in enumerate(PLATFORMS):
+            card = tk.Frame(grid, bg=_COLORS["panel2"], highlightbackground=_COLORS["border"],
+                             highlightthickness=1, cursor="hand2")
+            card.grid(row=i // 2, column=i % 2, sticky="nsew", padx=6, pady=6)
 
+            top = tk.Frame(card, bg=_COLORS["panel2"])
+            top.pack(fill="x", padx=10, pady=(10, 2))
+            dot = tk.Label(top, text="\u25cf", fg=_COLORS["muted"], bg=_COLORS["panel2"], font=("Segoe UI", 9))
+            dot.pack(side="left")
+            tk.Label(top, text=" " + name, fg=_COLORS["text"], bg=_COLORS["panel2"],
+                     font=("Segoe UI", 10, "bold")).pack(side="left")
+            count_lbl = tk.Label(top, text="0", fg=_COLORS["muted"], bg=_COLORS["panel2"], font=("Segoe UI", 8))
+            count_lbl.pack(side="right")
 
-@app.route("/api/stream")
-def api_stream():
-    def gen():
-        q = _subscribe()
+            last_lbl = tk.Label(card, text=hint, fg=_COLORS["muted"], bg=_COLORS["panel2"], font=("Segoe UI", 9),
+                                 anchor="w", justify="left", wraplength=190)
+            last_lbl.pack(fill="x", padx=10, pady=(0, 10))
+
+            widgets = {"card": card, "dot": dot, "count": count_lbl, "last": last_lbl, "hint": hint}
+            self._platform_widgets[key] = widgets
+            for w in (card, top, dot, last_lbl):
+                w.bind("<Button-1>", lambda e, k=key: self._toggle_filter(k))
+
+        ev_header = tk.Frame(root, bg=_COLORS["bg"])
+        ev_header.pack(fill="x", padx=16, pady=(16, 4))
+        self.events_heading = tk.Label(ev_header, text="LIVE ACTIVITY", fg=_COLORS["muted"], bg=_COLORS["bg"],
+                                        font=("Segoe UI", 8, "bold"))
+        self.events_heading.pack(side="left")
+        self.clear_btn = tk.Label(ev_header, text="\u2715 show all", fg=_COLORS["info"], bg=_COLORS["bg"],
+                                   font=("Segoe UI", 9), cursor="hand2")
+        self.clear_btn.bind("<Button-1>", lambda e: self._toggle_filter(None))
+
+        list_frame = tk.Frame(root, bg=_COLORS["bg"])
+        list_frame.pack(fill="both", expand=True, padx=16, pady=(0, 14))
+
+        style = ttk.Style()
         try:
-            yield "retry: 2000\n\n"
-            while True:
+            style.theme_use("clam")
+        except Exception:  # noqa: BLE001
+            pass
+        style.configure("Dash.Treeview", background=_COLORS["panel"], fieldbackground=_COLORS["panel"],
+                        foreground=_COLORS["text"], rowheight=44, borderwidth=0, font=("Segoe UI", 9))
+        style.configure("Dash.Treeview.Heading", background=_COLORS["panel2"], foreground=_COLORS["muted"],
+                        font=("Segoe UI", 8, "bold"))
+        style.map("Dash.Treeview", background=[("selected", _COLORS["panel2"])])
+
+        columns = ("time", "title", "message")
+        self.tree = ttk.Treeview(list_frame, columns=columns, show="headings", style="Dash.Treeview")
+        self.tree.heading("time", text="Time")
+        self.tree.heading("title", text="Event")
+        self.tree.heading("message", text="Details")
+        self.tree.column("time", width=64, anchor="w", stretch=False)
+        self.tree.column("title", width=150, anchor="w")
+        self.tree.column("message", width=210, anchor="w")
+        vsb = ttk.Scrollbar(list_frame, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=vsb.set)
+        self.tree.pack(side="left", fill="both", expand=True)
+        vsb.pack(side="right", fill="y")
+        self.tree.tag_configure("success", foreground=_COLORS["accent"])
+        self.tree.tag_configure("error", foreground=_COLORS["err"])
+        self.tree.tag_configure("info", foreground=_COLORS["info"])
+        self.tree.bind("<Double-1>", self._on_row_double_click)
+
+    # ------------------------------------------------------------ events --
+    def _load_recent(self):
+        self.all_events = list(reversed(_recent_events()))
+
+    def _poll_queue(self):
+        drained = False
+        while True:
+            try:
+                ev = _ui_queue.get_nowait()
+            except queue.Empty:
+                break
+            self.all_events.insert(0, ev)
+            drained = True
+        if drained:
+            self.all_events = self.all_events[:300]
+            self._render_platforms()
+            self._render_events()
+        self.root.after(300, self._poll_queue)
+
+    def _toggle_filter(self, key: str | None):
+        self.active_filter = None if self.active_filter == key else key
+        self._render_platforms()
+        self._render_events()
+
+    def _render_platforms(self):
+        now = time.time()
+        for key, name, hint in PLATFORMS:
+            evs = [e for e in self.all_events if e.get("category") == key]
+            w = self._platform_widgets[key]
+            w["count"].configure(text=str(len(evs)))
+            is_active = self.active_filter == key
+            border_color = _COLORS["accent"] if is_active else _COLORS["border"]
+            w["card"].configure(highlightbackground=border_color)
+            if evs:
+                last = evs[0]
                 try:
-                    ev = q.get(timeout=15)
-                    yield f"data: {json.dumps(ev)}\n\n"
-                except queue.Empty:
-                    yield ": keep-alive\n\n"
-        finally:
-            _unsubscribe(q)
+                    last_epoch = time.mktime(time.strptime(f"{last['date']} {last['ts']}", "%Y-%m-%d %H:%M:%S"))
+                    recent = (now - last_epoch) < 300
+                except Exception:  # noqa: BLE001
+                    recent = False
+                w["dot"].configure(fg=_COLORS["accent"] if recent else _COLORS["muted"])
+                w["last"].configure(text=f"{last['title']}  \u00b7  {last['ts']}")
+            else:
+                w["dot"].configure(fg=_COLORS["muted"])
+                w["last"].configure(text=hint)
 
-    return Response(gen(), mimetype="text/event-stream",
-                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+    def _render_events(self):
+        for row in self.tree.get_children():
+            self.tree.delete(row)
+        self._row_urls.clear()
+
+        if self.active_filter:
+            label = next(n for k, n, h in PLATFORMS if k == self.active_filter)
+            self.events_heading.configure(text=f"LIVE ACTIVITY \u2014 {label.upper()}")
+            self.clear_btn.pack(side="left", padx=(10, 0))
+            evs = [e for e in self.all_events if e.get("category") == self.active_filter]
+        else:
+            self.events_heading.configure(text="LIVE ACTIVITY")
+            self.clear_btn.pack_forget()
+            evs = self.all_events
+
+        for ev in evs[:150]:
+            row_id = self.tree.insert("", "end", values=(ev["ts"], ev["title"], ev["message"].replace("\n", " ")),
+                                       tags=(ev.get("level", "info"),))
+            if ev.get("url"):
+                self._row_urls[row_id] = ev["url"]
+
+    def _on_row_double_click(self, _event):
+        sel = self.tree.selection()
+        if not sel:
+            return
+        url = self._row_urls.get(sel[0])
+        if url:
+            webbrowser.open(url)
+
+    # ------------------------------------------------------------ status --
+    def _refresh_status(self):
+        import config  # local import: config may not be loaded until credentials.json exists
+        uptime = int(time.time() - _start_time)
+        hrs, mins = divmod(uptime // 60, 60)
+        self.mode_pill.configure(
+            text="LIVE \u2014 applying changes" if config.APPLY_CHANGES else "DRY RUN \u2014 notify only",
+            fg=_COLORS["accent"] if config.APPLY_CHANGES else _COLORS["muted"],
+        )
+        self.status_labels["watch_folder"].configure(text=str(config.WATCH_FOLDER))
+        self.status_labels["poll_interval"].configure(text=f"{config.POLL_INTERVAL_MINUTES} min")
+        self.status_labels["commit_mode"].configure(text=config.COMMIT_MODE)
+        self.status_labels["uptime"].configure(text=f"{hrs}h {mins}m")
+        self.root.after(20000, self._refresh_status)
+
+    # ------------------------------------------------------------ window --
+    def show(self):
+        self.root.deiconify()
+        self.root.lift()
+        self.root.focus_force()
+
+    def hide(self):
+        self.root.withdraw()
+
+    def destroy(self):
+        try:
+            self.root.destroy()
+        except Exception:  # noqa: BLE001
+            pass
 
 
-def run(host: str = "127.0.0.1", port: int = 47591) -> None:
-    """Blocking call — run this in a daemon thread from main.py."""
-    logging.getLogger("werkzeug").setLevel(logging.WARNING)
-    try:
-        app.run(host=host, port=port, threaded=True, debug=False, use_reloader=False)
-    except Exception as e:  # noqa: BLE001
-        log.error("Dashboard server failed to start on %s:%s — %s", host, port, e)
+_window: "DashboardWindow | None" = None
 
 
-_PAGE_HTML = """
-<!doctype html>
-<html lang="en">
-<head>
-<meta charset="utf-8">
-<title>repo-guardian</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-  :root {
-    --bg: #0d0f14; --panel: #161922; --panel-2: #1d212c; --border: #262b38;
-    --text: #e7e9ee; --muted: #8891a3; --accent: #4ade80; --accent-dim: #1f6f45;
-    --err: #f87171; --warn: #fbbf24; --info: #60a5fa;
-  }
-  * { box-sizing: border-box; }
-  body {
-    margin: 0; background: var(--bg); color: var(--text);
-    font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
-    min-height: 100vh;
-  }
-  header {
-    padding: 18px 22px; border-bottom: 1px solid var(--border);
-    display: flex; align-items: center; justify-content: space-between;
-    position: sticky; top: 0; background: var(--bg); z-index: 5;
-  }
-  .brand { display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 17px; }
-  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--accent);
-         box-shadow: 0 0 0 0 rgba(74,222,128,.6); animation: pulse 1.8s infinite; }
-  @keyframes pulse {
-    0% { box-shadow: 0 0 0 0 rgba(74,222,128,.55); }
-    70% { box-shadow: 0 0 0 8px rgba(74,222,128,0); }
-    100% { box-shadow: 0 0 0 0 rgba(74,222,128,0); }
-  }
-  .pill { font-size: 12px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--border);
-          color: var(--muted); }
-  .pill.on { color: var(--accent); border-color: var(--accent-dim); }
-  main { padding: 20px 22px 60px; max-width: 900px; margin: 0 auto; }
-  .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; margin-bottom: 22px; }
-  .card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px 16px; }
-  .card .label { color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; margin-bottom: 6px; }
-  .card .value { font-size: 14px; word-break: break-word; }
-  .card .value.mono { font-family: ui-monospace, Consolas, monospace; font-size: 12.5px; color: var(--muted); }
-  h2 { font-size: 13px; text-transform: uppercase; letter-spacing: .05em; color: var(--muted); margin: 0 0 12px; }
-  #events { display: flex; flex-direction: column; gap: 8px; }
-  .ev { background: var(--panel); border: 1px solid var(--border); border-left: 3px solid var(--info);
-        border-radius: 8px; padding: 10px 14px; animation: slidein .25s ease; }
-  .ev.success { border-left-color: var(--accent); }
-  .ev.error { border-left-color: var(--err); }
-  @keyframes slidein { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
-  .ev-top { display: flex; justify-content: space-between; gap: 10px; align-items: baseline; }
-  .ev-title { font-weight: 600; font-size: 13.5px; }
-  .ev-time { color: var(--muted); font-size: 11.5px; font-family: ui-monospace, Consolas, monospace; white-space: nowrap; }
-  .ev-msg { color: #c3c8d4; font-size: 12.5px; margin-top: 4px; white-space: pre-wrap; }
-  .ev a { color: var(--info); text-decoration: none; }
-  .empty { color: var(--muted); font-size: 13px; padding: 30px 0; text-align: center; }
-</style>
-</head>
-<body>
-<header>
-  <div class="brand"><span class="dot"></span> repo-guardian</div>
-  <span class="pill" id="mode-pill">…</span>
-</header>
-<main>
-  <div class="grid" id="status-grid"></div>
-  <h2>Live activity</h2>
-  <div id="events"><div class="empty">Waiting for the first event…</div></div>
-</main>
-<script>
-async function loadStatus() {
-  const r = await fetch('/api/status'); const s = await r.json();
-  const pill = document.getElementById('mode-pill');
-  pill.textContent = s.apply_changes ? 'LIVE — applying changes' : 'DRY RUN — notify only';
-  pill.className = 'pill' + (s.apply_changes ? ' on' : '');
-  const hrs = Math.floor(s.uptime_seconds/3600), mins = Math.floor((s.uptime_seconds%3600)/60);
-  document.getElementById('status-grid').innerHTML = `
-    <div class="card"><div class="label">Watch folder</div><div class="value mono">${s.watch_folder}</div></div>
-    <div class="card"><div class="label">Poll interval</div><div class="value">${s.poll_interval_minutes} min</div></div>
-    <div class="card"><div class="label">Commit mode</div><div class="value">${s.commit_mode}</div></div>
-    <div class="card"><div class="label">Uptime</div><div class="value">${hrs}h ${mins}m</div></div>
-    <div class="card"><div class="label">GitHub accounts</div><div class="value">${s.github_accounts.join(', ') || '—'}</div></div>
-    <div class="card"><div class="label">Vercel accounts</div><div class="value">${s.vercel_accounts.join(', ') || '—'}</div></div>
-    <div class="card"><div class="label">Convex projects</div><div class="value">${s.convex_projects.join(', ') || '—'}</div></div>
-  `;
-}
-function renderEvent(ev) {
-  const box = document.getElementById('events');
-  if (box.querySelector('.empty')) box.innerHTML = '';
-  const div = document.createElement('div');
-  div.className = 'ev ' + (ev.level || 'info');
-  const msg = ev.url ? `${ev.message}<br><a href="${ev.url}" target="_blank">Open →</a>` : ev.message;
-  div.innerHTML = `<div class="ev-top"><span class="ev-title">${ev.title}</span><span class="ev-time">${ev.ts}</span></div><div class="ev-msg">${msg}</div>`;
-  box.prepend(div);
-  while (box.children.length > 150) box.removeChild(box.lastChild);
-}
-async function loadRecent() {
-  const r = await fetch('/api/events'); const evs = await r.json();
-  evs.slice().reverse().forEach(renderEvent);
-}
-loadStatus(); loadRecent();
-setInterval(loadStatus, 20000);
-const es = new EventSource('/api/stream');
-es.onmessage = (e) => renderEvent(JSON.parse(e.data));
-</script>
-</body>
-</html>
-"""
+def create_window(start_visible: bool = False) -> "DashboardWindow | None":
+    """Create the single dashboard window on the CALLING (main) thread.
+    Tkinter must live on one thread for the life of the process — call this
+    once, from main.py's main thread, before anything else touches Tk."""
+    global _window
+    if not _HAS_TK:
+        log.warning("tkinter not available — no dashboard window will be shown. "
+                    "It ships with the standard python.org Windows installer; "
+                    "reinstall Python with the default options if this is missing.")
+        return None
+    _window = DashboardWindow()
+    if not start_visible:
+        _window.hide()
+    return _window
+
+
+def show() -> None:
+    if _window is not None:
+        _window.show()
+
+
+def hide() -> None:
+    if _window is not None:
+        _window.hide()
+
+
+def destroy() -> None:
+    if _window is not None:
+        _window.destroy()
+
+
+def has_window() -> bool:
+    return _window is not None
+
+
+def mainloop() -> None:
+    """Blocking call — run this on the main thread. Returns once the window
+    is destroyed (tray -> Exit)."""
+    if _window is not None:
+        _window.root.mainloop()
