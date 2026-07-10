@@ -79,8 +79,17 @@ class DashboardWindow:
     def __init__(self):
         self.root = tk.Tk()
         self.root.title("repo-guardian")
-        self.root.geometry("480x780")
-        self.root.minsize(420, 560)
+
+        # Size to fit the actual screen instead of a fixed 480x780 — on
+        # small/short laptop screens a fixed height can exceed the visible
+        # work area. Content that doesn't fit is reachable via the
+        # scrollable canvas built in _build_ui.
+        screen_w = self.root.winfo_screenwidth()
+        screen_h = self.root.winfo_screenheight()
+        win_w = min(480, max(360, screen_w - 40))
+        win_h = min(780, max(420, screen_h - 80))
+        self.root.geometry(f"{win_w}x{win_h}")
+        self.root.minsize(340, 380)
         self.root.configure(bg=_COLORS["bg"])
         self.root.protocol("WM_DELETE_WINDOW", self.hide)
 
@@ -98,7 +107,50 @@ class DashboardWindow:
 
     # ---------------------------------------------------------------- UI --
     def _build_ui(self):
-        root = self.root
+        # --- Scrollable outer shell -----------------------------------
+        # Everything below is built inside `content`, a frame sitting on a
+        # canvas. This makes the ENTIRE dashboard scrollable as one piece,
+        # so on small screens (short laptop displays, small windows) you
+        # can always scroll down and see every section instead of things
+        # getting clipped off the bottom of the window.
+        outer = tk.Frame(self.root, bg=_COLORS["bg"])
+        outer.pack(fill="both", expand=True)
+
+        self.canvas = tk.Canvas(outer, bg=_COLORS["bg"], highlightthickness=0)
+        vscroll = ttk.Scrollbar(outer, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=vscroll.set)
+        self.canvas.pack(side="left", fill="both", expand=True)
+        vscroll.pack(side="right", fill="y")
+
+        content = tk.Frame(self.canvas, bg=_COLORS["bg"])
+        content_window = self.canvas.create_window((0, 0), window=content, anchor="nw")
+
+        def _on_content_configure(_event):
+            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+        content.bind("<Configure>", _on_content_configure)
+
+        def _on_canvas_configure(event):
+            # Keep the inner content exactly as wide as the visible canvas
+            # so widgets reflow/wrap correctly as the window is resized —
+            # this is what makes the layout responsive, not just scrollable.
+            self.canvas.itemconfig(content_window, width=event.width)
+        self.canvas.bind("<Configure>", _on_canvas_configure)
+
+        def _on_mousewheel(event):
+            self.canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        def _bind_wheel(_event):
+            self.canvas.bind_all("<MouseWheel>", _on_mousewheel)
+
+        def _unbind_wheel(_event):
+            self.canvas.unbind_all("<MouseWheel>")
+
+        self.canvas.bind("<Enter>", _bind_wheel)
+        self.canvas.bind("<Leave>", _unbind_wheel)
+
+        # From here on, build the UI exactly as before, just inside
+        # `content` (the scrollable frame) instead of directly on root.
+        root = content
 
         header = tk.Frame(root, bg=_COLORS["bg"])
         header.pack(fill="x", padx=16, pady=(14, 8))
@@ -177,7 +229,12 @@ class DashboardWindow:
         style.map("Dash.Treeview", background=[("selected", _COLORS["panel2"])])
 
         columns = ("time", "title", "message")
-        self.tree = ttk.Treeview(list_frame, columns=columns, show="headings", style="Dash.Treeview")
+        # Fixed row-count height (rather than relying on pack "expand") so
+        # the tree has a sane natural size inside the scrollable canvas —
+        # the OUTER canvas is what scrolls on small screens, this inner
+        # list keeps its own scrollbar for scrolling within just the list.
+        self.tree = ttk.Treeview(list_frame, columns=columns, show="headings", style="Dash.Treeview",
+                                  height=12)
         self.tree.heading("time", text="Time")
         self.tree.heading("title", text="Event")
         self.tree.heading("message", text="Details")
@@ -342,6 +399,3 @@ def mainloop() -> None:
     is destroyed (tray -> Exit)."""
     if _window is not None:
         _window.root.mainloop()
-
-
-
