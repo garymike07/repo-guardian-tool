@@ -96,24 +96,24 @@ everything repo-guardian is doing (see below). **Exit** stops it.
 
 ## 6. The dashboard
 
-A **real native desktop window** (not a browser tab — no address bar, no
-browser chrome at all) shows a live feed of every event: file changes
-detected, commits/PRs, Convex/Vercel deploys, failures — plus your current
-config at a glance (watch folder, dry-run status, linked accounts/projects).
-It never displays tokens or deploy keys. It's a normal OS window: drag it
-anywhere, resize it, minimize it.
+A **real native desktop window** built with Tkinter (Python's built-in GUI
+toolkit) — no Flask, no HTTP server, no port, no browser, no WebView2.
+Nothing in how it renders touches web technology at all. It shows four live
+platform cards (Sites folder, GitHub, Vercel, Convex), each with a live-status
+dot, the last event, and an event count — click a card to filter the activity
+list below to just that platform. It also shows your current config at a
+glance (watch folder, dry-run status, commit mode, uptime). It never displays
+tokens or deploy keys.
 
 - Open it any time: right-click the tray icon → **Open Dashboard**
 - Closing the window (the X button) just hides it — repo-guardian keeps
   running in the background exactly as before. Use tray → **Exit** to
-  actually quit.
+  actually quit (this is what really destroys the window).
 - Set `"show_dashboard_on_start": true` in `credentials.json` if you want it
   to pop open automatically every time repo-guardian starts.
-- Under the hood it's powered by Windows' built-in WebView2 runtime (already
-  installed on Windows 10/11 — same engine as Edge, but with no browser UI
-  around it) via the `pywebview` package. If `pywebview` isn't installed, it
-  falls back automatically to opening your regular browser at
-  http://127.0.0.1:47591/ (port configurable via `dashboard_port`).
+- Double-click an event row that has a link (a PR, a Vercel deployment, etc.)
+  to open it in your default browser — that's the only place a browser is
+  ever involved, and only when you ask for it.
 
 ## 7. Run automatically at Windows login, and auto-restart if it ever crashes
 
@@ -140,7 +140,7 @@ wscript.exe C:\repo-guardian\launch_hidden.vbs
 ```
 
 To confirm it's alive, right-click the tray icon (it appears within a couple
-seconds) or open the dashboard at http://127.0.0.1:47591/. To watch the
+seconds) or use tray → **Open Dashboard**. To watch the
 supervisor's restart history: `type C:\repo-guardian\logs\supervisor.log`
 
 Only one copy of repo-guardian ever runs at a time — if you manually run
@@ -162,7 +162,7 @@ that and exits immediately rather than double-deploying anything.
 | `env_scanner.py` | Scans project source for referenced env var names |
 | `opencode_bridge.py` | Calls the OpenCode CLI for commit messages / README drafts |
 | `notifier.py` | Windows 11 toast notifications |
-| `dashboard.py` | Local live-event web dashboard (Flask + Server-Sent Events) |
+| `dashboard.py` | Native Tkinter dashboard — live event feed, no web tech at all |
 | `run_repo_guardian.bat` | Supervisor loop — restarts `main.py` forever if it crashes |
 | `launch_hidden.vbs` | Launches the supervisor with zero visible windows |
 | `setup_autostart.ps1` | One-time: registers hidden auto-start at Windows login |
