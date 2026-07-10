@@ -23,10 +23,15 @@ poll cycle.
 """
 import logging
 import logging.handlers
+import shutil
+import socket
+import subprocess
 import sys
 import threading
+import webbrowser
 
 import config
+import dashboard
 import github_manager
 import vercel_monitor
 import convex_monitor
@@ -40,18 +45,61 @@ from notifier import notify
 LOG_DIR = config.BASE_DIR / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 
+_handlers = [
+    logging.handlers.RotatingFileHandler(
+        LOG_DIR / "repo_guardian.log", maxBytes=5_000_000, backupCount=3, encoding="utf-8"
+    ),
+]
+if sys.stdout is not None:  # pythonw.exe (used for silent autostart) has no stdout — skip it then
+    _handlers.append(logging.StreamHandler(sys.stdout))
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    handlers=[
-        logging.StreamHandler(sys.stdout),
-        logging.handlers.RotatingFileHandler(
-            LOG_DIR / "repo_guardian.log", maxBytes=5_000_000, backupCount=3, encoding="utf-8"
-        ),
-    ],
+    handlers=_handlers,
 )
 log = logging.getLogger("repo_guardian.main")
 _stop_event = threading.Event()
+
+# Only one repo-guardian instance should ever run at once (autostart + a manual
+# launch could otherwise both fire duplicate deploys). We hold a bound socket
+# for the lifetime of the process as the lock; second instance detects it's
+# already taken and exits immediately.
+_LOCK_PORT = 47590
+_lock_socket: socket.socket | None = None
+
+
+def _acquire_single_instance_lock() -> bool:
+    global _lock_socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 0)
+    try:
+        s.bind(("127.0.0.1", _LOCK_PORT))
+        s.listen(1)
+    except OSError:
+        s.close()
+        return False
+    _lock_socket = s  # keep alive/open for as long as this process runs
+    return True
+
+
+def _dashboard_url() -> str:
+    return f"http://127.0.0.1:{config.DASHBOARD_PORT}/"
+
+
+def open_dashboard_window(icon=None, item=None) -> None:
+    """Open the dashboard as a chromeless app-style window if Edge/Chrome is
+    available, otherwise fall back to a normal browser tab."""
+    url = _dashboard_url()
+    for exe in ("msedge", "chrome"):
+        path = shutil.which(exe)
+        if path:
+            try:
+                subprocess.Popen([path, f"--app={url}", "--window-size=480,780"])
+                return
+            except Exception as e:  # noqa: BLE001
+                log.warning("Could not launch %s in app mode: %s", exe, e)
+    webbrowser.open(url)
 
 # cache of GitHub full_name per local folder, populated lazily
 _repo_cache: dict[str, str] = {}
@@ -209,7 +257,8 @@ def start_tray_icon() -> None:
         import pystray
         from PIL import Image, ImageDraw
     except ImportError:
-        log.info("pystray/Pillow not installed — running without a tray icon (console only).")
+        log.info("pystray/Pillow not installed — running without a tray icon (console only). "
+                  "Open the dashboard manually at %s", _dashboard_url())
         poll_loop()
         return
 
@@ -221,17 +270,30 @@ def start_tray_icon() -> None:
         icon.stop()
 
     icon = pystray.Icon("repo-guardian", img, "repo-guardian",
-                         menu=pystray.Menu(pystray.MenuItem("Exit", on_exit)))
+                         menu=pystray.Menu(
+                             pystray.MenuItem("Open Dashboard", open_dashboard_window, default=True),
+                             pystray.MenuItem("Exit", on_exit),
+                         ))
     threading.Thread(target=poll_loop, daemon=True).start()
     icon.run()
 
 
 def main() -> None:
+    if not _acquire_single_instance_lock():
+        log.warning("repo-guardian is already running (lock port %s in use) — exiting this copy.",
+                    _LOCK_PORT)
+        return
+
     problems = config.validate()
     for p in problems:
         log.warning("Config issue: %s", p)
 
     log.info("apply_changes=%s  commit_mode=%s", config.APPLY_CHANGES, config.COMMIT_MODE)
+
+    threading.Thread(target=dashboard.run, kwargs={"port": config.DASHBOARD_PORT}, daemon=True).start()
+    log.info("Dashboard running at %s", _dashboard_url())
+    if config.SHOW_DASHBOARD_ON_START:
+        threading.Timer(2.0, open_dashboard_window).start()
 
     bootstrap_agents_md()
 

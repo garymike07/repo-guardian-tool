@@ -5,6 +5,8 @@ testing this on macOS/Linux) so the rest of the app still runs.
 """
 import logging
 
+import dashboard
+
 log = logging.getLogger("repo_guardian.notifier")
 
 try:
@@ -16,13 +18,26 @@ except ImportError:
                 "Install with: pip install win11toast (Windows only)")
 
 
+def _infer_level(title: str, message: str) -> str:
+    text = f"{title} {message}".lower()
+    if "fail" in text or "error" in text or "crash" in text:
+        return "error"
+    if "deploy" in text or "pushed" in text or "opened" in text or "success" in text:
+        return "success"
+    return "info"
+
+
 def notify(title: str, message: str, url: str | None = None) -> None:
     """
-    Show a toast notification. If `url` is given, clicking the toast opens it
-    in the default browser (e.g. link straight to the failed Vercel deployment
-    or the GitHub PR).
+    Show a toast notification and stream the same event to the local
+    dashboard (http://127.0.0.1:<port>/). If `url` is given, clicking the
+    toast (or the dashboard entry) opens it in the default browser.
     """
     log.info("NOTIFY: %s — %s", title, message)
+    try:
+        dashboard.push_event(title, message, url=url, level=_infer_level(title, message))
+    except Exception as e:  # noqa: BLE001 - dashboard hiccups must never break notifications
+        log.error("Dashboard event push failed: %s", e)
     if not _HAS_TOAST:
         print(f"\n[NOTIFICATION] {title}\n{message}\n{'(open: ' + url + ')' if url else ''}\n")
         return

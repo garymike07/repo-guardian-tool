@@ -28,6 +28,9 @@ APPLY_CHANGES = bool(_raw.get("apply_changes", False))
 COMMIT_MODE = _raw.get("commit_mode", "pr")                 # "pr" (safe, default) or "direct"
 OPENCODE_MODEL = _raw.get("opencode_model", "")              # blank = opencode's default free model
 
+DASHBOARD_PORT = int(_raw.get("dashboard_port", 47591))
+SHOW_DASHBOARD_ON_START = bool(_raw.get("show_dashboard_on_start", False))
+
 # username (lowercased) -> token, for quick lookup when we know which account owns a repo
 GITHUB_TOKEN_BY_USER = {a["username"].lower(): a["token"] for a in GITHUB_ACCOUNTS if a.get("username")}
 

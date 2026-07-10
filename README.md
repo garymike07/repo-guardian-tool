@@ -91,17 +91,53 @@ A green dot appears in your system tray. From here:
   polled every `poll_interval_minutes` (default 5).
 - Convex errors show up the instant they happen (live log tail).
 
-Right-click the tray icon → **Exit** to stop it.
+Right-click the tray icon → **Open Dashboard** for a live, in-browser view of
+everything repo-guardian is doing (see below). **Exit** stops it.
 
-## 6. Run automatically at Windows login (optional)
+## 6. The dashboard
 
-`Win+R` → `shell:startup` → create a shortcut to:
+A local-only dashboard (nothing leaves your machine) shows a live feed of
+every event — file changes detected, commits/PRs, Convex/Vercel deploys,
+failures — plus your current config at a glance (watch folder, dry-run
+status, linked accounts/projects). It never displays tokens or deploy keys.
 
+- Open it any time: right-click the tray icon → **Open Dashboard**
+- Or manually: http://127.0.0.1:47591/ (port configurable via
+  `dashboard_port` in `credentials.json`)
+- Set `"show_dashboard_on_start": true` in `credentials.json` if you want it
+  to pop open automatically every time repo-guardian starts.
+
+## 7. Run automatically at Windows login, and auto-restart if it ever crashes
+
+Two pieces, both already in this repo:
+
+- **`run_repo_guardian.bat`** — a supervisor loop. It launches `main.py`
+  (via `pythonw.exe`, so no console window) and, if it ever exits for any
+  reason, waits 10s and starts it again — forever.
+- **`setup_autostart.ps1`** — registers a hidden launcher in your Startup
+  folder so `run_repo_guardian.bat` starts automatically, invisibly, every
+  time you log in to Windows.
+
+One-time setup:
+
+```powershell
+cd C:\repo-guardian
+powershell -ExecutionPolicy Bypass -File .\setup_autostart.ps1
 ```
-pythonw.exe C:\path\to\repo_guardian\main.py
+
+To start it immediately without logging out/in or restarting:
+
+```powershell
+wscript.exe C:\repo-guardian\launch_hidden.vbs
 ```
 
-(`pythonw.exe`, not `python.exe`, so no console window pops up.)
+To confirm it's alive, right-click the tray icon (it appears within a couple
+seconds) or open the dashboard at http://127.0.0.1:47591/. To watch the
+supervisor's restart history: `type C:\repo-guardian\logs\supervisor.log`
+
+Only one copy of repo-guardian ever runs at a time — if you manually run
+`python main.py` while the autostarted copy is already running, it detects
+that and exits immediately rather than double-deploying anything.
 
 ## What each file does
 
@@ -118,6 +154,10 @@ pythonw.exe C:\path\to\repo_guardian\main.py
 | `env_scanner.py` | Scans project source for referenced env var names |
 | `opencode_bridge.py` | Calls the OpenCode CLI for commit messages / README drafts |
 | `notifier.py` | Windows 11 toast notifications |
+| `dashboard.py` | Local live-event web dashboard (Flask + Server-Sent Events) |
+| `run_repo_guardian.bat` | Supervisor loop — restarts `main.py` forever if it crashes |
+| `launch_hidden.vbs` | Launches the supervisor with zero visible windows |
+| `setup_autostart.ps1` | One-time: registers hidden auto-start at Windows login |
 
 ## Limitations
 
