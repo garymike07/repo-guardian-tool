@@ -116,7 +116,7 @@ class DashboardWindow:
                             highlightthickness=1)
             row.pack(fill="x", pady=3)
             tk.Label(row, text=key.replace("_", " ").upper(), fg=_COLORS["muted"], bg=_COLORS["panel"],
-                     font=("Segoe UI", 7.5, "bold")).pack(anchor="w", padx=10, pady=(6, 0))
+                     font=("Segoe UI", 8, "bold")).pack(anchor="w", padx=10, pady=(6, 0))
             lbl = tk.Label(row, text="—", fg=_COLORS["text"], bg=_COLORS["panel"], font=("Segoe UI", 9),
                            anchor="w", justify="left", wraplength=420)
             lbl.pack(anchor="w", padx=10, pady=(0, 6))
@@ -159,7 +159,7 @@ class DashboardWindow:
                                         font=("Segoe UI", 8, "bold"))
         self.events_heading.pack(side="left")
         self.clear_btn = tk.Label(ev_header, text="\u2715 show all", fg=_COLORS["info"], bg=_COLORS["bg"],
-                                   font=("Segoe UI", 8.5), cursor="hand2")
+                                   font=("Segoe UI", 8), cursor="hand2")
         self.clear_btn.bind("<Button-1>", lambda e: self._toggle_filter(None))
 
         list_frame = tk.Frame(root, bg=_COLORS["bg"])
@@ -342,3 +342,6 @@ def mainloop() -> None:
     is destroyed (tray -> Exit)."""
     if _window is not None:
         _window.root.mainloop()
+
+
+
