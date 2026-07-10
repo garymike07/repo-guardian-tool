@@ -96,16 +96,24 @@ everything repo-guardian is doing (see below). **Exit** stops it.
 
 ## 6. The dashboard
 
-A local-only dashboard (nothing leaves your machine) shows a live feed of
-every event — file changes detected, commits/PRs, Convex/Vercel deploys,
-failures — plus your current config at a glance (watch folder, dry-run
-status, linked accounts/projects). It never displays tokens or deploy keys.
+A **real native desktop window** (not a browser tab — no address bar, no
+browser chrome at all) shows a live feed of every event: file changes
+detected, commits/PRs, Convex/Vercel deploys, failures — plus your current
+config at a glance (watch folder, dry-run status, linked accounts/projects).
+It never displays tokens or deploy keys. It's a normal OS window: drag it
+anywhere, resize it, minimize it.
 
 - Open it any time: right-click the tray icon → **Open Dashboard**
-- Or manually: http://127.0.0.1:47591/ (port configurable via
-  `dashboard_port` in `credentials.json`)
+- Closing the window (the X button) just hides it — repo-guardian keeps
+  running in the background exactly as before. Use tray → **Exit** to
+  actually quit.
 - Set `"show_dashboard_on_start": true` in `credentials.json` if you want it
   to pop open automatically every time repo-guardian starts.
+- Under the hood it's powered by Windows' built-in WebView2 runtime (already
+  installed on Windows 10/11 — same engine as Edge, but with no browser UI
+  around it) via the `pywebview` package. If `pywebview` isn't installed, it
+  falls back automatically to opening your regular browser at
+  http://127.0.0.1:47591/ (port configurable via `dashboard_port`).
 
 ## 7. Run automatically at Windows login, and auto-restart if it ever crashes
 
