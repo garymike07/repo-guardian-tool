@@ -15,7 +15,7 @@ if not CRED_FILE.exists():
           f"Copy credentials.example.json to credentials.json and fill in your real values.")
     sys.exit(1)
 
-with open(CRED_FILE, "r", encoding="utf-8") as f:
+with open(CRED_FILE, "r", encoding="utf-8-sig") as f:
     _raw = json.load(f)
 
 WATCH_FOLDER = Path(_raw.get("watch_folder", ""))
